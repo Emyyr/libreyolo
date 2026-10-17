@@ -351,13 +351,13 @@ _OTHER_FILTER = {"bicubic": "bilinear", "bilinear": "bicubic"}
 
 @pytest.fixture
 def switched_filter():
-    """Set a cached model's ``interpolation`` to the other filter, then restore it."""
+    """Set a cached model's ``interpolation`` (default: the other filter), then restore it."""
     changed = []
 
-    def switch(family):
+    def switch(family, interpolation=None):
         model = _model(family)
         changed.append((model, vars(model).get("interpolation")))
-        model.interpolation = _OTHER_FILTER[model.interpolation]
+        model.interpolation = interpolation or _OTHER_FILTER[model.interpolation]
         return model
 
     yield switch
@@ -369,13 +369,16 @@ def switched_filter():
 
 
 # DINOv2 and V-JEPA 2 declare no resize filter of their own.
+@pytest.mark.parametrize("interpolation", [None, "bilinear_no_antialias"])
 @pytest.mark.parametrize("family", sorted(set(FAMILIES) - {"dinov2", "vjepa2"}))
-def test_interpolation_reaches_every_preprocessing_path(family, switched_filter):
+def test_interpolation_reaches_every_preprocessing_path(
+    family, interpolation, switched_filter
+):
     """predict, val, calibration and exported backends resize the same way."""
     from libreyolo.export.exporter import _classify_eval_metadata
 
     default = _model(family)._preprocess(_IMAGE)[0][0]
-    model = switched_filter(family)
+    model = switched_filter(family, interpolation)
     predicted = model._preprocess(_IMAGE)[0][0]
 
     assert not torch.equal(predicted, default)
@@ -387,6 +390,82 @@ def test_interpolation_reaches_every_preprocessing_path(family, switched_filter)
     backend = _backend(family, **metadata)
     exported = backend._preprocess_classify(_IMAGE, model.input_size, "auto")[0][0]
     assert torch.equal(exported, predicted)
+
+
+def _cv2_bilinear(array, height, width):
+    import cv2
+
+    return cv2.resize(array, (width, height), interpolation=cv2.INTER_LINEAR)
+
+
+@pytest.mark.parametrize("shape", [(1333, 1999, 3), (48, 64, 3)], ids=["down", "up"])
+def test_no_antialias_resize_is_plain_bilinear(shape):
+    """``bilinear_no_antialias`` is cv2 INTER_LINEAR / torch antialias=False."""
+    import torch.nn.functional as F
+    from libreyolo.data.augment.classify import build_classify_transforms
+
+    array = np.random.default_rng(936).integers(0, 256, shape, dtype=np.uint8)
+    transform = build_classify_transforms(
+        224, augment=False, mean=(0, 0, 0), std=(1, 1, 1),
+        interpolation="bilinear_no_antialias", square_resize=True,
+    )
+    ours = (transform(Image.fromarray(array)) * 255).round().to(torch.int64)
+    reference = F.interpolate(
+        torch.from_numpy(array).permute(2, 0, 1)[None].float(),
+        size=(224, 224), mode="bilinear", align_corners=False, antialias=False,
+    )[0].round().clamp(0, 255).to(torch.int64)
+    assert torch.equal(ours, reference)
+    opencv = torch.from_numpy(_cv2_bilinear(array, 224, 224)).permute(2, 0, 1)
+    assert (ours - opencv.to(torch.int64)).abs().max() <= 1  # cv2 fixed-point rounding
+
+
+def test_no_antialias_differs_from_pillow_bilinear_on_a_downscale():
+    from libreyolo.data.augment.classify import build_classify_transforms
+
+    image = Image.fromarray(
+        np.random.default_rng(1).integers(0, 256, (1333, 1999, 3), dtype=np.uint8)
+    )
+    pillow, plain = (
+        build_classify_transforms(224, augment=False, interpolation=name)(image)
+        for name in ("bilinear", "bilinear_no_antialias")
+    )
+    assert (pillow - plain).abs().mean() > 0.1
+
+
+def test_no_antialias_train_crop_resizes_without_antialiasing():
+    """The training crop resizes its random box the same way as eval."""
+    from torchvision import transforms
+    from libreyolo.data.augment.classify import build_classify_transforms
+
+    array = np.random.default_rng(2).integers(0, 256, (900, 1200, 3), dtype=np.uint8)
+    pipeline = build_classify_transforms(
+        64, augment=True, mean=(0, 0, 0), std=(1, 1, 1), flip_prob=0.0,
+        interpolation="bilinear_no_antialias",
+    )
+    crop = pipeline.transforms[0]
+    torch.manual_seed(5)
+    top, left, height, width = transforms.RandomResizedCrop.get_params(
+        Image.fromarray(array), crop.scale, crop.ratio
+    )
+    torch.manual_seed(5)
+    ours = (pipeline(Image.fromarray(array)) * 255).round().to(torch.int64)
+    box = np.ascontiguousarray(array[top : top + height, left : left + width])
+    opencv = torch.from_numpy(_cv2_bilinear(box, 64, 64)).permute(2, 0, 1)
+    assert (ours - opencv.to(torch.int64)).abs().max() <= 1
+
+
+def test_no_antialias_survives_save_and_reload(tmp_path):
+    from libreyolo.utils.serialization import validate_checkpoint_metadata
+
+    model = _cls("mobilenetv4")(size="s", nb_classes=3, device="cpu")
+    model.interpolation = "bilinear_no_antialias"
+    path = model.save(str(tmp_path / "model.pt"))
+    checkpoint = torch.load(path, weights_only=True)
+    assert checkpoint["interpolation"] == "bilinear_no_antialias"
+    assert validate_checkpoint_metadata(checkpoint) == []
+    restored = libreyolo.LibreYOLO(path, device="cpu")
+    assert restored.interpolation == "bilinear_no_antialias"
+    assert torch.equal(restored._preprocess(_IMAGE)[0], model._preprocess(_IMAGE)[0])
 
 
 def test_unknown_interpolation_raises(switched_filter):
