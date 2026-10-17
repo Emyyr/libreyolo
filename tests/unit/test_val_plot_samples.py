@@ -100,7 +100,9 @@ class _RecordingConfusionMatrix:
     def __init__(self):
         self.calls = []
 
-    def process_image(self, pb, pc, ps, gt_boxes, gt_classes):
+    def process_image(
+        self, pb, pc, ps, gt_boxes, gt_classes, crowd_boxes=None, crowd_classes=None
+    ):
         self.calls.append(
             (pb.tolist(), pc.tolist(), ps.tolist(), gt_boxes.tolist(), gt_classes.tolist())
         )

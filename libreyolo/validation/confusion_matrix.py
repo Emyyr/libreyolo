@@ -47,6 +47,38 @@ def _box_iou(boxes1: np.ndarray, boxes2: np.ndarray) -> np.ndarray:
     return inter / np.maximum(union, 1e-7)
 
 
+def _in_crowd(
+    pred_boxes: np.ndarray,
+    pred_classes: np.ndarray,
+    crowd_boxes: Optional[np.ndarray],
+    crowd_classes: Optional[np.ndarray],
+    iou_thres: float,
+) -> np.ndarray:
+    """Mask of the predictions a same-class crowd region covers (#934).
+
+    The COCO crowd rule pycocotools applies to mAP: the overlap with a crowd
+    region (``iscrowd=1``) is the intersection over the prediction's own area,
+    and a prediction no ordinary ground truth took that reaches ``iou_thres``
+    with one is ignored instead of counted as a false positive.
+    """
+    hit = np.zeros(len(pred_boxes), dtype=bool)
+    if crowd_boxes is None or not len(crowd_boxes) or not len(pred_boxes):
+        return hit
+    crowd_boxes = np.asarray(crowd_boxes, dtype=np.float64).reshape(-1, 4)
+    crowd_classes = np.asarray(crowd_classes).reshape(-1).astype(np.int64)
+    area = (pred_boxes[:, 2] - pred_boxes[:, 0]).clip(0) * (
+        pred_boxes[:, 3] - pred_boxes[:, 1]
+    ).clip(0)
+    ix1 = np.maximum(pred_boxes[:, None, 0], crowd_boxes[None, :, 0])
+    iy1 = np.maximum(pred_boxes[:, None, 1], crowd_boxes[None, :, 1])
+    ix2 = np.minimum(pred_boxes[:, None, 2], crowd_boxes[None, :, 2])
+    iy2 = np.minimum(pred_boxes[:, None, 3], crowd_boxes[None, :, 3])
+    inter = np.maximum(ix2 - ix1, 0) * np.maximum(iy2 - iy1, 0)
+    ioa = inter / np.maximum(area[:, None], 1e-7)
+    same_class = pred_classes[:, None] == crowd_classes[None, :]
+    return ((ioa >= iou_thres) & same_class).any(axis=1)
+
+
 def _as_index_array(values: Any) -> np.ndarray:
     """Flatten tensors, arrays or (lists of) either into one int64 vector."""
     if isinstance(values, (list, tuple)):
@@ -191,8 +223,15 @@ class ConfusionMatrix:
         pred_scores: np.ndarray,
         gt_boxes: np.ndarray,
         gt_classes: np.ndarray,
+        crowd_boxes: Optional[np.ndarray] = None,
+        crowd_classes: Optional[np.ndarray] = None,
     ) -> None:
-        """Add one image's detections (xyxy pixels) to a detection matrix."""
+        """Add one image's detections (xyxy pixels) to a detection matrix.
+
+        A prediction left unpaired inside a same-class crowd region
+        (``crowd_boxes``, COCO ``iscrowd=1``) is ignored, as mAP ignores it,
+        instead of counted as background.
+        """
         if self.task != "detect":
             raise ValueError("process_image applies to a detection confusion matrix")
         pred_boxes = np.asarray(pred_boxes, dtype=np.float64).reshape(-1, 4)
@@ -214,6 +253,11 @@ class ConfusionMatrix:
         background = self.nc
         gt_paired = np.zeros(len(gt_boxes), dtype=bool)
         pred_paired = np.zeros(len(pred_boxes), dtype=bool)
+        # A crowd region takes the predictions inside it that their own class
+        # does not match, so those never pair across classes either.
+        in_crowd = _in_crowd(
+            pred_boxes, pred_classes, crowd_boxes, crowd_classes, self.iou_thres
+        )
         if len(gt_boxes) and len(pred_boxes):
             iou = _box_iou(gt_boxes, pred_boxes)  # (num_gt, num_pred)
             gt_idxs, pred_idxs = np.where(iou >= self.iou_thres)
@@ -221,12 +265,16 @@ class ConfusionMatrix:
             for gi, pi in zip(gt_idxs[order], pred_idxs[order]):
                 if gt_paired[gi] or pred_paired[pi]:
                     continue
+                if in_crowd[pi] and gt_classes[gi] != pred_classes[pi]:
+                    continue
                 gt_paired[gi] = True
                 pred_paired[pi] = True
                 self._counts[pred_classes[pi], gt_classes[gi]] += 1
 
         np.add.at(self._counts, (background, gt_classes[~gt_paired]), 1)
-        np.add.at(self._counts, (pred_classes[~pred_paired], background), 1)
+        np.add.at(
+            self._counts, (pred_classes[~pred_paired & ~in_crowd], background), 1
+        )
 
     def process_cls_preds(self, preds: Any, targets: Any) -> None:
         """Add top-1 class indices against label indices to a classify matrix.
