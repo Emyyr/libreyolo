@@ -14,9 +14,12 @@ platform): after mixup, labels from *both* images must be present.
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import pytest
 
+from libreyolo.data.augment import yolo9 as yolo9_augment
 from libreyolo.data.augment.yolo9 import (
     YOLO9MosaicMixupDataset,
     YOLO9TrainTransform,
@@ -126,3 +129,26 @@ def test_mixup_output_is_padded_to_max_labels():
     # Exactly two real objects (one per image); the rest padding class = -1.
     assert int((out[:, 0] >= 0).sum()) == 2
     assert np.all(out[out[:, 0] < 0][:, 0] == -1)
+
+
+def test_mixup_warns_once_when_the_merged_labels_exceed_max_labels(
+    monkeypatch, caplog
+):
+    """Each image fits in ``max_labels`` but the mix does not: the extra box
+    is dropped with one warning that gives the merged count (#935)."""
+    monkeypatch.setattr(yolo9_augment, "_dropped_labels_warned", False)
+    ds = _make_dataset()
+    labels = np.zeros((50, 5), dtype=np.float32)
+    labels[:] = [3.0, 0.10, 0.10, 0.50, 0.50]
+    img = np.zeros((3, 64, 64), dtype=np.float32)
+
+    with caplog.at_level(logging.WARNING, logger=yolo9_augment.__name__):
+        _mixed_img, out = ds._mixup(img, labels)
+        ds._mixup(img, labels)
+
+    assert (out[:, 0] >= 0).sum() == 50
+    warnings = [
+        r.getMessage() for r in caplog.records if "max_labels=50" in r.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert "51 labels" in warnings[0]

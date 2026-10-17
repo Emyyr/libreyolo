@@ -46,6 +46,9 @@ before 1.4.0 are documented in the
 
 ### Fixed
 
+- **YOLO9 label assignment no longer scales with `max_labels`. (#935)**
+  The task-aligned matcher of YOLO9, YOLO9-E2E and YOLO9-P2 built dense batch × `max_labels` × anchors tensors over the padded label rows, so a high `max_labels` ran out of GPU memory even on sparse data (about 40 GiB at batch 16, 800 px and `max_labels=3000`). Each image is now matched on its own boxes, as YOLOX and MMDetection assign labels, so memory follows the densest image in the batch. Assignments and losses are unchanged, and matching is faster on typical data. Boxes beyond `max_labels` are still dropped, now with a warning.
+
 - **A classifier's `interpolation` now applies everywhere and is saved with the model. (#936)**
   Setting `model.interpolation` (`"bilinear"`, `"bicubic"` or `"nearest"`) changed training, `val()` and export metadata, but `predict()` and INT8 calibration kept each family's built-in filter (bicubic for MobileNetV4, ResNet, ConvNeXt, EfficientNetV2, DeiT, Swin and ViT; bilinear for AlexNet and VGG), and the value reset to that default on reload and in DDP workers. `predict()` and calibration now read it too, `save()`, `best.pt` and `last.pt` record it and loading restores it (older checkpoints keep the family default), and an unknown filter name raises instead of silently resizing bilinearly. Defaults are unchanged.
 
