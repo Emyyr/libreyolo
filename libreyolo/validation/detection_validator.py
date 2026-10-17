@@ -114,6 +114,8 @@ class DetectionValidator(ValidationLossMixin, BaseValidator):
         self.class_names: Optional[List[str]] = None
         self.iou_thresholds = torch.tensor(self.config.iou_thresholds)
         self.nc = model.nb_classes
+        # The model's own class count; self.nc becomes the dataset's.
+        self._model_nc = self.nc
         checkpoint_probe = getattr(model, "_checkpoint_train_config", None)
         checkpoint_config = checkpoint_probe() if callable(checkpoint_probe) else {}
         self._checkpoint_single_cls = bool(checkpoint_config.get("single_cls", False))
@@ -903,16 +905,27 @@ class DetectionValidator(ValidationLossMixin, BaseValidator):
                 "by the dataloader."
             )
         cfg = getattr(self, "config", None)
-        if getattr(cfg, "classes", None):
-            # Filter in model-label space before native COCO category mapping.
-            # single_cls predictions already use the collapsed output label 0.
-            kept_classes = [0] if self._single_cls_enabled() else self.config.classes
+        kept_classes = getattr(cfg, "classes", None)
+        single_cls = bool(getattr(cfg, "single_cls", False))
+        # single_cls scores every box as class 0, like the ground truth. A
+        # one-class model already labels its boxes 0; a multiclass model is
+        # first kept to classes= in its own label space, then relabelled.
+        collapse = single_cls and int(getattr(self, "_model_nc", None) or 1) > 1
+        if single_cls and not collapse and kept_classes:
+            kept_classes = [0]
+        if kept_classes or collapse:
             filtered = []
             for pred in preds:
-                keep = torch.isin(
-                    pred["classes"], pred["classes"].new_tensor(kept_classes)
-                )
-                filtered.append({key: value[keep] for key, value in pred.items()})
+                if kept_classes:
+                    # Filter in model-label space before native COCO
+                    # category mapping.
+                    keep = torch.isin(
+                        pred["classes"], pred["classes"].new_tensor(kept_classes)
+                    )
+                    pred = {key: value[keep] for key, value in pred.items()}
+                if collapse:
+                    pred = {**pred, "classes": torch.zeros_like(pred["classes"])}
+                filtered.append(pred)
             # Subclass evaluators consume the same batch after this method.
             preds[:] = filtered
         if getattr(cfg, "agnostic_nms", False):

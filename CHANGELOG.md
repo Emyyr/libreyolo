@@ -49,6 +49,9 @@ before 1.4.0 are documented in the
 - **COCO crowd regions no longer count as false positives in the confusion matrix, `image_metrics` and `visualize`. (#934)**
   The dataloaders skip `iscrowd=1` annotations, so a prediction on a crowd region was counted as a false positive by the confusion matrix, `results.box.image_metrics` and the `visualize` images, while mAP (pycocotools) ignored it in the same `val()` run. They now apply the COCO rule too: a prediction no ground truth of its class matched, lying at least half inside a same-class crowd region (intersection over its own area), is ignored. mAP is unchanged, and datasets without crowd annotations score exactly as before.
 
+- **`val(single_cls=True)` scores a multiclass model's detections as one class. (#934)**
+  The ground truth was collapsed to class 0 but the predictions kept the model's own class ids, so with a model trained on several classes (a COCO checkpoint, say) every detection that wasn't class 0 was dropped from mAP, the confusion matrix and `image_metrics`. Detections are now kept to `classes=` in the model's label space and then relabelled 0. Models trained with `single_cls=True` score exactly as before. YOLO9-t on coco8 with `single_cls=True`: mAP50-95 0.222 before, 0.383 now.
+
 - **Simultaneous `save=True` runs no longer share a run directory.**
   `increment_path(..., mkdir=True)` now reserves the directory by creating it, so two predict, track or generate calls starting at the same moment get separate `predict`, `predict2`, ... folders instead of overwriting each other's files.
 
