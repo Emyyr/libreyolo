@@ -409,8 +409,15 @@ class BoxMatcher:
         """
         Match targets to anchors using Task Aligned Assignment.
 
+        Each image is matched on its own boxes, as YOLOX and MMDetection
+        assign labels, so memory follows the densest image instead of the
+        batch size times the padded label count (#935). Every step of the
+        assignment is per image, so the result is the same as one batched
+        match over the padded targets.
+
         Args:
-            target: Ground truth [B, targets, 5] with [class_id, x1, y1, x2, y2]
+            target: Ground truth [B, targets, 5] with [class_id, x1, y1, x2, y2];
+                padding rows (class -1) follow each image's real boxes
             predict: Tuple of (pred_cls, pred_bbox)
                 - pred_cls: [B, anchors, num_classes] - class logits (will be sigmoided)
                 - pred_bbox: [B, anchors, 4] - decoded boxes in pixel coords
@@ -420,6 +427,27 @@ class BoxMatcher:
             valid_mask: [B, anchors] boolean mask
         """
         predict_cls, predict_bbox = predict
+        # One host sync for the whole batch, not one per image.
+        counts = (target[..., 0] >= 0).sum(dim=1).tolist()
+        matches = [
+            self._match_image(
+                target[i : i + 1, :count],
+                (predict_cls[i : i + 1], predict_bbox[i : i + 1]),
+            )
+            for i, count in enumerate(counts)
+        ]
+        anchor_matched_targets, valid_mask, indices = (
+            torch.cat(parts) for parts in zip(*matches)
+        )
+        if return_indices:
+            return anchor_matched_targets, valid_mask, indices
+        return anchor_matched_targets, valid_mask
+
+    def _match_image(
+        self, target: Tensor, predict: Tuple[Tensor, Tensor]
+    ) -> Tuple[Tensor, Tensor, Tensor]:
+        """Match one image ([1, targets, 5], no padding) to its anchors."""
+        predict_cls, predict_bbox = predict
 
         n_targets = target.shape[1]
         if n_targets == 0:
@@ -428,12 +456,10 @@ class BoxMatcher:
             align_bbox = torch.zeros_like(predict_bbox, device=device)
             valid_mask = torch.zeros(predict_cls.shape[:2], dtype=bool, device=device)
             anchor_matched_targets = torch.cat([align_cls, align_bbox], dim=-1)
-            if return_indices:
-                matched_indices = torch.zeros(
-                    predict_cls.shape[:2], dtype=torch.long, device=device
-                )
-                return anchor_matched_targets, valid_mask, matched_indices
-            return anchor_matched_targets, valid_mask
+            matched_indices = torch.zeros(
+                predict_cls.shape[:2], dtype=torch.long, device=device
+            )
+            return anchor_matched_targets, valid_mask, matched_indices
 
         target_cls, target_bbox = target.split([1, 4], dim=-1)
         target_cls = target_cls.long().clamp(0)
@@ -481,9 +507,7 @@ class BoxMatcher:
         align_cls = align_cls * normalize_term * valid_mask[:, :, None]
 
         anchor_matched_targets = torch.cat([align_cls, align_bbox], dim=-1)
-        if return_indices:
-            return anchor_matched_targets, valid_mask, unique_indices.squeeze(-1)
-        return anchor_matched_targets, valid_mask
+        return anchor_matched_targets, valid_mask, unique_indices.squeeze(-1)
 
 
 # =============================================================================

@@ -49,6 +49,23 @@ logger = logging.getLogger(__name__)
 # alpha = 1 the ratio is uniform on [0, 1].
 _MIXUP_BETA_ALPHA = 1.0
 
+_dropped_labels_warned = False
+
+
+def _warn_dropped_labels(count: int, max_labels: int) -> None:
+    """Warn once per process when an image holds more boxes than ``max_labels``."""
+    global _dropped_labels_warned
+    if count <= max_labels or _dropped_labels_warned:
+        return
+    _dropped_labels_warned = True
+    logger.warning(
+        "An image has %d labels, more than max_labels=%d: the extra %d are "
+        "dropped and trained as background. Raise max_labels to keep them.",
+        count,
+        max_labels,
+        count - max_labels,
+    )
+
 
 def preproc(img, input_size, swap=(2, 0, 1), letterbox_pad=None):
     """Letterbox to RGB float32/0-1 (matches YOLO9ValPreprocessor and weights)."""
@@ -298,6 +315,7 @@ class YOLO9TrainTransform:
         # Fill class with -1 to indicate padding
         padded_labels[:, 0] = -1
 
+        _warn_dropped_labels(len(targets_t), self.max_labels)
         n = min(len(targets_t), self.max_labels)
         padded_labels[:n] = targets_t[:n]
 
@@ -704,7 +722,9 @@ class YOLO9MosaicMixupDataset:
             real2 = labels2[labels2[:, 0] >= 0]
         else:
             real2 = np.zeros((0, label_dim), dtype=labels.dtype)
-        merged = np.vstack([real1, real2])[:max_labels]
+        merged = np.vstack([real1, real2])
+        _warn_dropped_labels(len(merged), max_labels)
+        merged = merged[:max_labels]
 
         # Re-pad to max_labels with class = -1 (matches YOLO9TrainTransform).
         padded = np.zeros((max_labels, label_dim), dtype=labels.dtype)

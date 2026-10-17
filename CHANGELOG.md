@@ -46,6 +46,9 @@ before 1.4.0 are documented in the
 
 ### Fixed
 
+- **YOLO9 label assignment no longer scales with `max_labels`. (#935)**
+  The task-aligned matcher of YOLO9, YOLO9-E2E and YOLO9-P2 built dense batch × `max_labels` × anchors tensors over the padded label rows, so a high `max_labels` ran out of GPU memory even on sparse data (about 40 GiB at batch 16, 800 px and `max_labels=3000`). Each image is now matched on its own boxes, as YOLOX and MMDetection assign labels, so memory follows the densest image in the batch. Assignments and losses are unchanged, and matching is faster on typical data. Boxes beyond `max_labels` are still dropped, now with a warning.
+
 - **COCO crowd regions no longer count as false positives in the confusion matrix, `image_metrics` and `visualize`. (#934)**
   The dataloaders skip `iscrowd=1` annotations, so a prediction on a crowd region was counted as a false positive by the confusion matrix, `results.box.image_metrics` and the `visualize` images, while mAP (pycocotools) ignored it in the same `val()` run. They now apply the COCO rule too: a prediction no ground truth of its class matched, lying at least half inside a same-class crowd region (intersection over its own area), is ignored. mAP is unchanged, and datasets without crowd annotations score exactly as before.
 
@@ -64,6 +67,9 @@ before 1.4.0 are documented in the
 
 - **TensorRT batched predict with `classes` and a small `max_det`. (#928)**
   The batched path cut to `max_det` before the class filter, so it could return fewer boxes than `batch=1`. It now uses the same candidate budget as single-image predict.
+
+- **Validation no longer crashes when training with `amp_dtype="bfloat16"`. (#940)**
+  Validation under bf16 autocast passed bfloat16 outputs to postprocessors that convert them to NumPy, which has no bfloat16, so it failed with `Got unsupported ScalarType BFloat16`. The validator now casts bfloat16 outputs to float32 before postprocessing; fp16 and fp32 outputs are passed through unchanged. Thanks @AnuarSv.
 
 ### Security/Licensing
 

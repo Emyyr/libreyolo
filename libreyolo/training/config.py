@@ -569,8 +569,9 @@ class YOLO9Config(TrainConfig):
     sync_bn: bool = True
     # Per-image ground-truth cap in the train transforms. Dense datasets
     # (e.g. aerial imagery) exceed the historical 100-box default; boxes
-    # beyond the cap are silently dropped. MultimediaTechLab/YOLO caps at
-    # 100; 300 is a training-only change (old checkpoints still load).
+    # beyond the cap are dropped, with a warning. MultimediaTechLab/YOLO caps
+    # at 100; 300 is a training-only change (old checkpoints still load).
+    # Assignment memory follows each image's real boxes, not this cap (#935).
     max_labels: int = 300
     # PGI auxiliary-head loss weight. 0 disables the branch. Training-only;
     # inference stays single-head. Resume of a checkpoint without ``aux.*``
