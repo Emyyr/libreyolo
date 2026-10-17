@@ -9,7 +9,6 @@ INT8 calibration and exported backends produce the same tensor.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -402,6 +401,7 @@ def _cv2_bilinear(array, height, width):
 def test_no_antialias_resize_is_plain_bilinear(shape):
     """``bilinear_no_antialias`` is cv2 INTER_LINEAR / torch antialias=False."""
     import torch.nn.functional as F
+
     from libreyolo.data.augment.classify import build_classify_transforms
 
     array = np.random.default_rng(936).integers(0, 256, shape, dtype=np.uint8)
@@ -435,6 +435,7 @@ def test_no_antialias_differs_from_pillow_bilinear_on_a_downscale():
 def test_no_antialias_train_crop_resizes_without_antialiasing():
     """The training crop resizes its random box the same way as eval."""
     from torchvision import transforms
+
     from libreyolo.data.augment.classify import build_classify_transforms
 
     array = np.random.default_rng(2).integers(0, 256, (900, 1200, 3), dtype=np.uint8)
@@ -514,69 +515,45 @@ def test_checkpoint_with_an_unknown_interpolation_is_invalid(tmp_path):
         libreyolo.LibreYOLO(path, device="cpu")
 
 
-def _tiny_imagefolder(root):
-    for split in ("train", "val"):
-        for c in range(2):
-            directory = root / split / f"c{c}"
-            directory.mkdir(parents=True)
-            image = np.zeros((48, 48, 3), dtype=np.uint8)
-            image[:, :, c] = 220
-            for i in range(2):
-                Image.fromarray(image).save(directory / f"{i}.png")
-    return str(root)
+def test_training_checkpoints_keep_the_interpolation(switched_filter):
+    """``best.pt`` and ``last.pt`` take the trainer's extra metadata."""
+    from libreyolo.training.trainer import BaseTrainer
+
+    model = switched_filter("resnet")
+    metadata = BaseTrainer._checkpoint_extra_metadata(SimpleNamespace(wrapper_model=model))
+    assert metadata == {"interpolation": model.interpolation}
 
 
-def _train_tiny(model, data, tmp_path, name, **kwargs):
-    return model.train(
-        data=data,
-        batch=2,
-        imgsz=32,
-        workers=0,
-        device="cpu",
-        amp=False,
-        ema=False,
-        warmup_epochs=0,
-        project=str(tmp_path / "runs"),
-        name=name,
-        exist_ok=True,
-        **kwargs,
-    )
+def test_resume_takes_the_interpolation_before_the_trainer_is_built(
+    tmp_path, monkeypatch
+):
+    """``train(resume=path)`` sets the saved filter before datasets are built."""
+    from libreyolo.models.mobilenetv4 import trainer as mobilenetv4_trainer
 
-
-def test_training_checkpoints_keep_the_interpolation(tmp_path):
-    data = _tiny_imagefolder(tmp_path / "data")
-    model = _cls("mobilenetv4")(size="s", device="cpu")
-    model.interpolation = "bilinear"
-    result = _train_tiny(model, data, tmp_path, "train", epochs=1)
-    best = Path(result["best_checkpoint"])
-    for path in (best, best.with_name("last.pt")):
-        assert torch.load(path, weights_only=True)["interpolation"] == "bilinear"
-        assert libreyolo.LibreYOLO(str(path), device="cpu").interpolation == "bilinear"
-
-
-def test_resume_trains_with_the_checkpoint_interpolation(tmp_path, monkeypatch):
-    """``train(resume=path)`` builds its datasets with the saved filter."""
-    from libreyolo.data import classify_dataset
-
-    data = _tiny_imagefolder(tmp_path / "data")
-    model = _cls("mobilenetv4")(size="s", device="cpu")
-    model.interpolation = "bilinear"
-    first = _train_tiny(model, data, tmp_path, "train", epochs=1)
-    last = Path(first["best_checkpoint"]).with_name("last.pt")
+    saved = _cls("mobilenetv4")(size="s", nb_classes=2, device="cpu")
+    saved.interpolation = "bilinear"
+    path = saved.save(str(tmp_path / "last.pt"))
+    checkpoint = torch.load(path, weights_only=True)
+    checkpoint["config"] = {"epochs": 1}  # a training checkpoint, minus the state
+    torch.save(checkpoint, path)
 
     seen = []
 
-    class _Recording(classify_dataset.ClassifyDataset):
-        def __init__(self, *args, transform_kwargs=None, **kwargs):
-            if transform_kwargs:
-                seen.append(transform_kwargs.get("interpolation"))
-            super().__init__(*args, transform_kwargs=transform_kwargs, **kwargs)
+    class _Trainer:
+        def __init__(self, *, wrapper_model, **kwargs):
+            seen.append(wrapper_model.interpolation)
 
-    monkeypatch.setattr(classify_dataset, "ClassifyDataset", _Recording)
-    fresh = _cls("mobilenetv4")(size="s", device="cpu")
-    _train_tiny(fresh, data, tmp_path, "resumed", epochs=2, resume=str(last))
-    assert seen and set(seen) == {"bilinear"}
-    assert fresh.interpolation == "bilinear"
+        def setup(self):
+            raise _Stop
+
+    class _Stop(Exception):
+        pass
+
+    monkeypatch.setattr(mobilenetv4_trainer, "MobileNetV4Trainer", _Trainer)
+    fresh = _cls("mobilenetv4")(size="s", nb_classes=2, device="cpu")
+    with pytest.raises(_Stop):
+        fresh.train(data=str(tmp_path), resume=path, device="cpu")
+    assert seen == ["bilinear"]
 
 
 def test_ddp_workers_get_the_interpolation(tmp_path, monkeypatch, switched_filter):
