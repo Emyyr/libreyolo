@@ -145,9 +145,7 @@ def _classify_eval_metadata(model) -> dict:
     if crop_pct is not None:
         meta["crop_pct"] = float(crop_pct)
     if interpolation is not None:
-        from ..data.augment.classify import normalize_interpolation
-
-        meta["interpolation"] = normalize_interpolation(interpolation)
+        meta["interpolation"] = str(interpolation)
     for key in ("norm_mean", "norm_std"):
         value = getattr(model, key, None)
         if value is not None:
