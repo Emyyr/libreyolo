@@ -62,6 +62,9 @@ before 1.4.0 are documented in the
 - **TensorRT batched predict with `classes` and a small `max_det`. (#928)**
   The batched path cut to `max_det` before the class filter, so it could return fewer boxes than `batch=1`. It now uses the same candidate budget as single-image predict.
 
+- **Validation no longer crashes when training with `amp_dtype="bfloat16"`. (#940)**
+  Validation under bf16 autocast passed bfloat16 outputs to postprocessors that convert them to NumPy, which has no bfloat16, so it failed with `Got unsupported ScalarType BFloat16`. The validator now casts bfloat16 outputs to float32 before postprocessing; fp16 and fp32 outputs are passed through unchanged. Thanks @AnuarSv.
+
 ### Security/Licensing
 
 - **YOLO9 and YOLO9-P2 code follows the MIT upstream.**
