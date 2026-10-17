@@ -52,6 +52,12 @@ before 1.4.0 are documented in the
 - **A classifier's `interpolation` now applies everywhere and is saved with the model. (#936)**
   Setting `model.interpolation` (`"bilinear"`, `"bicubic"` or `"nearest"`) changed training, `val()` and export metadata, but `predict()` and INT8 calibration kept each family's built-in filter (bicubic for MobileNetV4, ResNet, ConvNeXt, EfficientNetV2, DeiT, Swin and ViT; bilinear for AlexNet and VGG), and the value reset to that default on reload and in DDP workers. `predict()` and calibration now read it too, `save()`, `best.pt` and `last.pt` record it and loading restores it (older checkpoints keep the family default), and an unknown filter name raises instead of silently resizing bilinearly. A new value, `model.interpolation = "bilinear_no_antialias"`, resizes with plain bilinear and no antialiasing in training (`RandomResizedCrop` included), evaluation, `predict()`, calibration and exported backends, as `cv2.resize(INTER_LINEAR)` and torch `antialias=False` do, so a classifier can be trained on the pixels a TFLite or OpenCV-style runtime resize gives it. Defaults are unchanged.
 
+- **COCO crowd regions no longer count as false positives in the confusion matrix, `image_metrics` and `visualize`. (#934)**
+  The dataloaders skip `iscrowd=1` annotations, so a prediction on a crowd region was counted as a false positive by the confusion matrix, `results.box.image_metrics` and the `visualize` images, while mAP (pycocotools) ignored it in the same `val()` run. They now apply the COCO rule too: a prediction no ground truth of its class matched, lying at least half inside a same-class crowd region (intersection over its own area), is ignored. mAP is unchanged, and datasets without crowd annotations score exactly as before.
+
+- **`val(single_cls=True)` scores a multiclass model's detections as one class. (#934)**
+  The ground truth was collapsed to class 0 but the predictions kept the model's own class ids, so with a model trained on several classes (a COCO checkpoint, say) every detection that wasn't class 0 was dropped from mAP, the confusion matrix and `image_metrics`. Detections are now kept to `classes=` in the model's label space and then relabelled 0. Models trained with `single_cls=True` score exactly as before. YOLO9-t on coco8 with `single_cls=True`: mAP50-95 0.222 before, 0.383 now.
+
 - **Simultaneous `save=True` runs no longer share a run directory.**
   `increment_path(..., mkdir=True)` now reserves the directory by creating it, so two predict, track or generate calls starting at the same moment get separate `predict`, `predict2`, ... folders instead of overwriting each other's files.
 
@@ -64,6 +70,9 @@ before 1.4.0 are documented in the
 
 - **TensorRT batched predict with `classes` and a small `max_det`. (#928)**
   The batched path cut to `max_det` before the class filter, so it could return fewer boxes than `batch=1`. It now uses the same candidate budget as single-image predict.
+
+- **Validation no longer crashes when training with `amp_dtype="bfloat16"`. (#940)**
+  Validation under bf16 autocast passed bfloat16 outputs to postprocessors that convert them to NumPy, which has no bfloat16, so it failed with `Got unsupported ScalarType BFloat16`. The validator now casts bfloat16 outputs to float32 before postprocessing; fp16 and fp32 outputs are passed through unchanged. Thanks @AnuarSv.
 
 ### Security/Licensing
 

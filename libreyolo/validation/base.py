@@ -1,5 +1,6 @@
 """Base validator class for LibreYOLO."""
 
+import copy
 import logging
 import sys
 import time
@@ -24,6 +25,34 @@ if TYPE_CHECKING:
     from libreyolo.models.base import BaseModel
 
     from .confusion_matrix import ConfusionMatrix
+
+
+def _upcast_bfloat16(value: Any) -> Any:
+    """Return ``value`` with every bfloat16 tensor cast to float32.
+
+    NumPy has no bfloat16, so postprocessors that call ``.numpy()`` on raw
+    outputs fail when validation runs under bf16 autocast (#940).
+
+    Containers without bfloat16 tensors are returned as the same object, and
+    dict subclasses keep their type, so non-bf16 validation is untouched.
+    """
+    if isinstance(value, torch.Tensor):
+        return value.float() if value.dtype == torch.bfloat16 else value
+    if isinstance(value, dict):
+        items = {key: _upcast_bfloat16(item) for key, item in value.items()}
+        if all(items[key] is item for key, item in value.items()):
+            return value
+        upcast = copy.copy(value)
+        upcast.update(items)
+        return upcast
+    if isinstance(value, (list, tuple)):
+        items = [_upcast_bfloat16(item) for item in value]
+        if all(new is old for new, old in zip(items, value)):
+            return value
+        if isinstance(value, tuple) and hasattr(value, "_fields"):
+            return type(value)(*items)
+        return type(value)(items)
+    return value
 
 
 def _empty_curve() -> np.ndarray:
@@ -396,7 +425,8 @@ class BaseValidator(ABC):
             # Replays a captured CUDA graph when run() opened a graph scope;
             # exactly model._forward(images) otherwise, including for the
             # duck-typed model doubles in the test suite.
-            return forward_maybe_graphed(self.model, images)
+            preds = forward_maybe_graphed(self.model, images)
+        return _upcast_bfloat16(preds)
 
     def _autocast_context(self):
         if self.config.half and self.device.type == "cuda":

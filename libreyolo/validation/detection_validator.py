@@ -114,6 +114,8 @@ class DetectionValidator(ValidationLossMixin, BaseValidator):
         self.class_names: Optional[List[str]] = None
         self.iou_thresholds = torch.tensor(self.config.iou_thresholds)
         self.nc = model.nb_classes
+        # The model's own class count; self.nc becomes the dataset's.
+        self._model_nc = self.nc
         checkpoint_probe = getattr(model, "_checkpoint_train_config", None)
         checkpoint_config = checkpoint_probe() if callable(checkpoint_probe) else {}
         self._checkpoint_single_cls = bool(checkpoint_config.get("single_cls", False))
@@ -903,16 +905,27 @@ class DetectionValidator(ValidationLossMixin, BaseValidator):
                 "by the dataloader."
             )
         cfg = getattr(self, "config", None)
-        if getattr(cfg, "classes", None):
-            # Filter in model-label space before native COCO category mapping.
-            # single_cls predictions already use the collapsed output label 0.
-            kept_classes = [0] if self._single_cls_enabled() else self.config.classes
+        kept_classes = getattr(cfg, "classes", None)
+        single_cls = bool(getattr(cfg, "single_cls", False))
+        # single_cls scores every box as class 0, like the ground truth. A
+        # one-class model already labels its boxes 0; a multiclass model is
+        # first kept to classes= in its own label space, then relabelled.
+        collapse = single_cls and int(getattr(self, "_model_nc", None) or 1) > 1
+        if single_cls and not collapse and kept_classes:
+            kept_classes = [0]
+        if kept_classes or collapse:
             filtered = []
             for pred in preds:
-                keep = torch.isin(
-                    pred["classes"], pred["classes"].new_tensor(kept_classes)
-                )
-                filtered.append({key: value[keep] for key, value in pred.items()})
+                if kept_classes:
+                    # Filter in model-label space before native COCO
+                    # category mapping.
+                    keep = torch.isin(
+                        pred["classes"], pred["classes"].new_tensor(kept_classes)
+                    )
+                    pred = {key: value[keep] for key, value in pred.items()}
+                if collapse:
+                    pred = {**pred, "classes": torch.zeros_like(pred["classes"])}
+                filtered.append(pred)
             # Subclass evaluators consume the same batch after this method.
             preds[:] = filtered
         if getattr(cfg, "agnostic_nms", False):
@@ -961,7 +974,9 @@ class DetectionValidator(ValidationLossMixin, BaseValidator):
         are written as the images are validated, to ``visualize/errors/``
         when the image has a false positive or a miss and to
         ``visualize/correct/`` otherwise. The same arrays feed the run's
-        confusion matrix. None of this feeds the mAP metrics.
+        confusion matrix. None of this feeds the mAP metrics, but all of it
+        ignores predictions inside COCO crowd regions as mAP does
+        (:meth:`_crowd_regions`, #934).
         """
         from .val_plotter import (  # noqa: PLC0415
             ValPlotter,
@@ -1000,9 +1015,16 @@ class DetectionValidator(ValidationLossMixin, BaseValidator):
                 pred_boxes = pred["boxes"].cpu().numpy().reshape(-1, 4)
                 pred_classes = pred["classes"].cpu().numpy().astype(int).reshape(-1)
                 pred_scores = pred["scores"].cpu().numpy().reshape(-1)
+                crowd = self._crowd_regions(img_ids[i])
                 if confusion_matrix is not None:
                     confusion_matrix.process_image(
-                        pred_boxes, pred_classes, pred_scores, gt_boxes, gt_classes
+                        pred_boxes,
+                        pred_classes,
+                        pred_scores,
+                        gt_boxes,
+                        gt_classes,
+                        crowd_boxes=crowd[0],
+                        crowd_classes=crowd[1],
                     )
                 entry = image_metrics_entry(
                     match_detections(
@@ -1012,6 +1034,8 @@ class DetectionValidator(ValidationLossMixin, BaseValidator):
                         gt_boxes,
                         gt_classes,
                         conf_thres=conf_thres,
+                        crowd_boxes=crowd[0],
+                        crowd_classes=crowd[1],
                     )
                 )
                 if img_path:
@@ -1041,6 +1065,8 @@ class DetectionValidator(ValidationLossMixin, BaseValidator):
                     show_labels=cfg.show_labels,
                     show_conf=cfg.show_conf,
                     conf_thres=conf_thres,
+                    crowd_boxes=crowd[0],
+                    crowd_classes=crowd[1],
                 )
             except Exception as exc:
                 # Once per run: this runs on every validation, training included.
@@ -1049,6 +1075,42 @@ class DetectionValidator(ValidationLossMixin, BaseValidator):
                     logger.warning(
                         "image metrics / visualize failed for image %d: %s", index, exc
                     )
+
+    def _crowd_regions(self, img_id) -> Tuple[np.ndarray, np.ndarray]:
+        """One image's COCO crowd regions, as xyxy pixel boxes and labels.
+
+        The dataloaders skip ``iscrowd=1`` annotations, so they never reach
+        ``targets``, yet pycocotools ignores the predictions inside them when
+        it computes mAP. The regions come from the evaluator's own ground
+        truth and label mapping, so ``classes=`` and ``single_cls`` shape
+        them exactly as they shape mAP. YOLO-format datasets have none.
+        """
+        evaluator = getattr(self, "coco_evaluator", None)
+        coco_gt = getattr(evaluator, "coco_gt", None)
+        cache = getattr(self, "_crowd_cache", None)
+        if cache is None or cache[0] is not coco_gt:
+            mapping = getattr(evaluator, "label_to_category_id", None) or {}
+            category_to_label = {v: k for k, v in mapping.items()}
+            regions: Dict[Any, List[Tuple[float, ...]]] = {}
+            for ann in getattr(coco_gt, "anns", {}).values():
+                if not ann.get("iscrowd"):
+                    continue
+                x, y, w, h = ann["bbox"]
+                category = int(ann["category_id"])
+                regions.setdefault(ann["image_id"], []).append(
+                    (x, y, x + w, y + h, category_to_label.get(category, category))
+                )
+            cache = self._crowd_cache = (
+                coco_gt,
+                {
+                    image_id: np.asarray(rows, dtype=np.float64)
+                    for image_id, rows in regions.items()
+                },
+            )
+        rows = cache[1].get(img_id)
+        if rows is None:
+            return np.zeros((0, 4), dtype=np.float64), np.zeros(0, dtype=np.int64)
+        return rows[:, :4], rows[:, 4].astype(np.int64)
 
     def _parse_gt_boxes(
         self, gt_row: torch.Tensor, orig_h: int, orig_w: int

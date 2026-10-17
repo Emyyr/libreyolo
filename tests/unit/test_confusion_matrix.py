@@ -143,6 +143,61 @@ class TestDetection:
         assert _detect_fixture().class_accuracy() == {"cat": 0.0, "dog": 1.0}
 
 
+class TestCrowdRegions:
+    """COCO crowd regions (``iscrowd=1``) ignore predictions, as in mAP (#934)."""
+
+    CROWD = np.array([[100.0, 100.0, 160.0, 160.0]])
+
+    def _matrix(self, pred_box, pred_class, gt_boxes, gt_classes, crowd_class):
+        cm = ConfusionMatrix(nc=2)
+        cm.process_image(
+            np.array([pred_box]),
+            np.array([pred_class]),
+            np.array([0.9]),
+            np.array(gt_boxes, dtype=np.float64).reshape(-1, 4),
+            np.array(gt_classes),
+            crowd_boxes=self.CROWD,
+            crowd_classes=np.array([crowd_class]),
+        )
+        return cm.matrix
+
+    def test_unpaired_prediction_inside_a_same_class_crowd_is_ignored(self):
+        assert int(self._matrix(_box(110, 110), 1, [], [], 1).sum()) == 0
+
+    def test_a_crowd_of_another_class_does_not_ignore_it(self):
+        assert self._matrix(_box(110, 110), 1, [], [], 0)[1, 2] == 1
+
+    def test_a_prediction_mostly_outside_the_crowd_still_counts(self):
+        # 20x20 box with a 5x5 corner inside: overlap 0.0625 of its own area.
+        assert self._matrix(_box(155, 155, 20.0), 1, [], [], 1)[1, 2] == 1
+
+    def test_a_prediction_paired_with_ground_truth_inside_a_crowd_counts(self):
+        matrix = self._matrix(_box(110, 110), 1, [_box(110, 110)], [1], 1)
+        assert matrix[1, 1] == 1
+        assert int(matrix.sum()) == 1
+
+    def test_a_crowd_prediction_never_pairs_with_another_class(self):
+        # COCO scores each class alone: the class-1 prediction falls to its
+        # crowd region, and the class-0 box it overlaps is a miss.
+        matrix = self._matrix(_box(110, 110), 1, [_box(110, 110)], [0], 1)
+        assert matrix[1, 0] == 0
+        assert matrix[2, 0] == 1
+        assert int(matrix.sum()) == 1
+
+    def test_a_zero_threshold_still_needs_the_crowd_class(self):
+        cm = ConfusionMatrix(nc=2, iou_thres=0.0)
+        cm.process_image(
+            np.array([_box(110, 110)]),
+            np.array([1]),
+            np.array([0.9]),
+            np.zeros((0, 4)),
+            np.zeros(0, dtype=int),
+            crowd_boxes=self.CROWD,
+            crowd_classes=np.array([0]),
+        )
+        assert cm.matrix[1, 2] == 1
+
+
 class TestExport:
     def test_summary_has_one_row_per_predicted_class(self):
         rows = _detect_fixture().summary()
