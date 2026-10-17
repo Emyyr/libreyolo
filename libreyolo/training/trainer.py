@@ -4211,7 +4211,11 @@ class BaseTrainer(ABC):
 
     def _checkpoint_extra_metadata(self) -> Dict[str, Any]:
         from ..utils.event_histogram import input_metadata
-        return input_metadata(self.wrapper_model)
+        metadata = input_metadata(self.wrapper_model)
+        interpolation = getattr(self.wrapper_model, "_interpolation_metadata", None)
+        if callable(interpolation):
+            metadata.update(interpolation())
+        return metadata
 
     def upgrade_resume_checkpoint(self, checkpoint):
         """Family hook: migrate a loaded resume checkpoint to the current layout.

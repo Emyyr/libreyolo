@@ -46,6 +46,9 @@ before 1.4.0 are documented in the
 
 ### Fixed
 
+- **A classifier's `interpolation` now applies everywhere and is saved with the model. (#936)**
+  Setting `model.interpolation` (`"bilinear"`, `"bicubic"` or `"nearest"`) changed training, `val()` and export metadata, but `predict()` and INT8 calibration kept each family's built-in filter (bicubic for MobileNetV4, ResNet, ConvNeXt, EfficientNetV2, DeiT, Swin and ViT; bilinear for AlexNet and VGG), and the value reset to that default on reload and in DDP workers. `predict()` and calibration now read it too, `save()`, `best.pt` and `last.pt` record it and loading restores it (older checkpoints keep the family default), and an unknown filter name raises instead of silently resizing bilinearly. Defaults are unchanged.
+
 - **Simultaneous `save=True` runs no longer share a run directory.**
   `increment_path(..., mkdir=True)` now reserves the directory by creating it, so two predict, track or generate calls starting at the same moment get separate `predict`, `predict2`, ... folders instead of overwriting each other's files.
 

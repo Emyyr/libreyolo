@@ -1251,6 +1251,7 @@ class BaseModel(ABC):
                 if ckpt_names is not None:
                     self.names = self._sanitize_names(ckpt_names, effective_nc)
                 self._restore_checkpoint_input_size(loaded)
+                self._restore_checkpoint_interpolation(loaded)
                 self._validate_loaded_state_dict_for_task(state_dict, loaded)
             else:
                 state_dict = self._prepare_state_dict(loaded)
@@ -1271,6 +1272,30 @@ class BaseModel(ABC):
             raise RuntimeError(
                 f"Failed to load model weights from {model_path}: {e}"
             ) from e
+
+    def _interpolation_metadata(self) -> dict:
+        """The classification resize filter, for checkpoint metadata (#936).
+
+        Empty for models without one. The filter is part of the model: train,
+        ``val()``, ``predict()``, INT8 calibration and export all read it.
+        """
+        interpolation = getattr(self, "interpolation", None)
+        if interpolation is None:
+            return {}
+        from ...data.augment.classify import normalize_interpolation
+
+        return {"interpolation": normalize_interpolation(interpolation)}
+
+    def _restore_checkpoint_interpolation(self, loaded: dict) -> None:
+        """Adopt the resize filter a classification checkpoint was saved with.
+
+        Checkpoints written before the key existed keep the family default.
+        """
+        if "interpolation" not in loaded or not hasattr(self, "interpolation"):
+            return
+        from ...data.augment.classify import normalize_interpolation
+
+        self.interpolation = normalize_interpolation(loaded["interpolation"])
 
     def _restore_checkpoint_input_size(self, loaded: dict) -> None:
         """Adopt the rectangular input size a checkpoint was saved at (#899).
@@ -2499,6 +2524,7 @@ class BaseModel(ABC):
         save_extra = getattr(self, "_save_extra_metadata", None)
         if callable(save_extra):
             extra_metadata = dict(save_extra() or {})
+        extra_metadata.update(self._interpolation_metadata())
         from ...utils.event_histogram import input_metadata
         extra_metadata.update(input_metadata(self))
         checkpoint = wrap_libreyolo_checkpoint(

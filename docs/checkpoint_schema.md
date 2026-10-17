@@ -75,6 +75,16 @@ Training, validation and resume require matching dataset metadata. ONNX stores
 `input_profile` as JSON and the other fields as strings. The ONNX reader checks
 the graph channel count and rejects a two-channel graph without the profile.
 
+Optional classification preprocessing:
+
+- `interpolation`: the model's resize filter, `"bilinear"`, `"bicubic"` or
+  `"nearest"`. `save()`, `best.pt` and `last.pt` write the model's
+  `interpolation`, and loading restores it, so training, `val()`,
+  `predict()`, INT8 calibration and export all keep the filter the checkpoint
+  was saved with. Checkpoints without the key keep the family default. Any
+  other value is invalid. The resize is Pillow's, which filters (antialiases)
+  when it downscales.
+
 ConvNeXt V2 published classifiers also carry the optional flat
 `weight_license`, `weight_license_url`, `weight_dataset`,
 `weight_commercial_use`, `source`, `source_commit`, and `source_sha256` fields.
@@ -268,8 +278,9 @@ model's preprocessing and the logits stay bit-identical:
 
 - `crop_pct`: float center-crop ratio. The pre-crop resize target is
   `floor(imgsz / crop_pct)`. Readers default to `0.875` when the key is absent.
-- `interpolation`: resize filter, `"bilinear"` or `"bicubic"`. Readers default
-  to `"bilinear"` when the key is absent.
+- `interpolation`: the model's resize filter, `"bilinear"`, `"bicubic"` or
+  `"nearest"`, applied with Pillow (antialiased when downscaling). Readers
+  default to `"bilinear"` when the key is absent and reject other values.
 - `norm_mean`, `norm_std`: optional JSON-encoded RGB lists in `[0, 1]` scale,
   written by families whose normalization is not ImageNet (CLIP, SigLIP2, PE,
   ViT). Readers default to the ImageNet statistics.

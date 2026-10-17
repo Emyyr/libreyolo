@@ -50,14 +50,33 @@ DEFAULT_FLIP_PROB = 0.5
 ScaleSpec = float | tuple[float, float]
 
 
-def _interp_mode(interpolation) -> InterpolationMode:
+#: Resize filters a classification model's ``interpolation`` accepts.
+INTERPOLATIONS = {
+    "bilinear": InterpolationMode.BILINEAR,
+    "bicubic": InterpolationMode.BICUBIC,
+    "nearest": InterpolationMode.NEAREST,
+}
+
+
+def normalize_interpolation(interpolation) -> str:
+    """Return ``interpolation`` as one of :data:`INTERPOLATIONS`, or raise.
+
+    An unknown filter name is an error rather than a silent bilinear, so a
+    model never trains or predicts with a resize it was not configured for.
+    """
     if isinstance(interpolation, InterpolationMode):
-        return interpolation
-    return {
-        "bilinear": InterpolationMode.BILINEAR,
-        "bicubic": InterpolationMode.BICUBIC,
-        "nearest": InterpolationMode.NEAREST,
-    }.get(str(interpolation).lower(), InterpolationMode.BILINEAR)
+        interpolation = interpolation.value
+    key = str(interpolation).lower()
+    if key not in INTERPOLATIONS:
+        raise ValueError(
+            f"Unknown interpolation {interpolation!r}. Valid values are "
+            f"{', '.join(INTERPOLATIONS)}."
+        )
+    return key
+
+
+def _interp_mode(interpolation) -> InterpolationMode:
+    return INTERPOLATIONS[normalize_interpolation(interpolation)]
 
 
 def _build_auto_augment(name: str, mode: InterpolationMode):

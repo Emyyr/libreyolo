@@ -9,6 +9,7 @@ INT8 calibration and exported backends produce the same tensor.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -339,3 +340,153 @@ def test_runtime_metadata_filter_keeps_the_eval_pipeline():
     backend = _backend("vit", **exported)
     assert backend.norm_mean == (0.1, 0.2, 0.3)
     assert backend.resize_mode == "stretch"
+
+
+# ---------------------------------------------------------------------------
+# The model's resize filter (#936)
+# ---------------------------------------------------------------------------
+
+_OTHER_FILTER = {"bicubic": "bilinear", "bilinear": "bicubic"}
+
+
+@pytest.fixture
+def switched_filter():
+    """Set a cached model's ``interpolation`` to the other filter, then restore it."""
+    changed = []
+
+    def switch(family):
+        model = _model(family)
+        changed.append((model, vars(model).get("interpolation")))
+        model.interpolation = _OTHER_FILTER[model.interpolation]
+        return model
+
+    yield switch
+    for model, original in changed:
+        if original is None:
+            del model.interpolation  # back to the class attribute
+        else:
+            model.interpolation = original
+
+
+# DINOv2 and V-JEPA 2 declare no resize filter of their own.
+@pytest.mark.parametrize("family", sorted(set(FAMILIES) - {"dinov2", "vjepa2"}))
+def test_interpolation_reaches_every_preprocessing_path(family, switched_filter):
+    """predict, val, calibration and exported backends resize the same way."""
+    from libreyolo.export.exporter import _classify_eval_metadata
+
+    default = _model(family)._preprocess(_IMAGE)[0][0]
+    model = switched_filter(family)
+    predicted = model._preprocess(_IMAGE)[0][0]
+
+    assert not torch.equal(predicted, default)
+    assert torch.equal(_val_tensor(model), predicted)
+    array, _ = model._get_preprocess_numpy()(np.asarray(_IMAGE), model.input_size)
+    np.testing.assert_array_equal(array, predicted.numpy())
+    metadata = _classify_eval_metadata(model)
+    assert metadata["interpolation"] == model.interpolation
+    backend = _backend(family, **metadata)
+    exported = backend._preprocess_classify(_IMAGE, model.input_size, "auto")[0][0]
+    assert torch.equal(exported, predicted)
+
+
+def test_unknown_interpolation_raises(switched_filter):
+    from libreyolo.data.augment.classify import build_classify_transforms
+
+    with pytest.raises(ValueError, match="Unknown interpolation 'lanczos'"):
+        build_classify_transforms(224, augment=False, interpolation="lanczos")
+    model = switched_filter("resnet")
+    model.interpolation = "lanczos"
+    with pytest.raises(ValueError, match="Unknown interpolation"):
+        model._preprocess(_IMAGE)
+
+
+def test_interpolation_survives_save_and_reload(tmp_path):
+    from libreyolo.utils.serialization import validate_checkpoint_metadata
+
+    model = _cls("mobilenetv4")(size="s", nb_classes=3, device="cpu")
+    model.interpolation = "bilinear"
+    path = model.save(str(tmp_path / "model.pt"))
+    checkpoint = torch.load(path, weights_only=True)
+    assert checkpoint["interpolation"] == "bilinear"
+    assert validate_checkpoint_metadata(checkpoint) == []
+
+    restored = libreyolo.LibreYOLO(path, device="cpu")
+    assert restored.interpolation == "bilinear"
+    assert torch.equal(
+        restored._preprocess(_IMAGE)[0], model._preprocess(_IMAGE)[0]
+    )
+
+    del checkpoint["interpolation"]  # a checkpoint from before #936
+    torch.save(checkpoint, path)
+    assert libreyolo.LibreYOLO(path, device="cpu").interpolation == "bicubic"
+
+
+def test_checkpoint_with_an_unknown_interpolation_is_invalid(tmp_path):
+    from libreyolo.utils.serialization import validate_checkpoint_metadata
+
+    path = _cls("mobilenetv4")(size="s", nb_classes=3, device="cpu").save(
+        str(tmp_path / "model.pt")
+    )
+    checkpoint = torch.load(path, weights_only=True)
+    checkpoint["interpolation"] = "lanczos"
+    assert any("lanczos" in e for e in validate_checkpoint_metadata(checkpoint))
+    torch.save(checkpoint, path)
+    with pytest.raises(RuntimeError, match="Unknown interpolation"):
+        libreyolo.LibreYOLO(path, device="cpu")
+
+
+def test_training_checkpoints_keep_the_interpolation(tmp_path):
+    for split in ("train", "val"):
+        for c in range(2):
+            directory = tmp_path / "data" / split / f"c{c}"
+            directory.mkdir(parents=True)
+            image = np.zeros((48, 48, 3), dtype=np.uint8)
+            image[:, :, c] = 220
+            for i in range(2):
+                Image.fromarray(image).save(directory / f"{i}.png")
+    model = _cls("mobilenetv4")(size="s", device="cpu")
+    model.interpolation = "bilinear"
+    result = model.train(
+        data=str(tmp_path / "data"),
+        epochs=1,
+        batch=2,
+        imgsz=32,
+        workers=0,
+        device="cpu",
+        amp=False,
+        ema=False,
+        warmup_epochs=0,
+        project=str(tmp_path / "runs"),
+        name="train",
+        exist_ok=True,
+    )
+    best = Path(result["best_checkpoint"])
+    for path in (best, best.with_name("last.pt")):
+        assert torch.load(path, weights_only=True)["interpolation"] == "bilinear"
+        assert libreyolo.LibreYOLO(str(path), device="cpu").interpolation == "bilinear"
+
+
+def test_ddp_workers_get_the_interpolation(tmp_path, monkeypatch, switched_filter):
+    from libreyolo.training import ddp_spawn
+
+    model = switched_filter("resnet")
+    init_kw = ddp_spawn._build_init_kw(model)
+    assert init_kw["_attrs"] == {"interpolation": model.interpolation}
+
+    seen = {}
+
+    class _Worker:
+        def __init__(self, weights_path, **kwargs):
+            self.interpolation = "bicubic"  # what a fresh build sets
+
+        def train(self, **kwargs):
+            seen["interpolation"] = self.interpolation
+            return {}
+
+    for key in ("RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT"):
+        monkeypatch.setenv(key, "0")
+    ddp_spawn._libreyolo_ddp_worker(
+        0, 1, "127.0.0.1", 0, str(tmp_path / "result.json"), "unused.pt",
+        {**init_kw, "_class_object": _Worker}, {},
+    )
+    assert seen == {"interpolation": model.interpolation}
