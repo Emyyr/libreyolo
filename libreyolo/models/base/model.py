@@ -135,6 +135,10 @@ def _wrap_train_with_cfg(train_fn: Callable) -> Callable:
             merged.update(user_kwargs)
 
         resume = merged.get("resume", False)
+        if isinstance(resume, (str, Path)) and not isinstance(resume, bool):
+            # The trainer builds its datasets before it loads the checkpoint, so
+            # a resumed classifier takes the checkpoint's resize filter here.
+            self._restore_resume_interpolation(resume)
         resumes_optimizer = "optimizer" in sig.parameters and "optimizer" not in merged
         if resume and (
             not merged.get("single_cls", False)
@@ -1296,6 +1300,16 @@ class BaseModel(ABC):
         from ...data.augment.classify import normalize_interpolation
 
         self.interpolation = normalize_interpolation(loaded["interpolation"])
+
+    def _restore_resume_interpolation(self, resume: str | Path) -> None:
+        """Adopt the resize filter of the checkpoint ``train(resume=path)`` continues."""
+        if not hasattr(self, "interpolation") or not Path(resume).is_file():
+            return
+        checkpoint = load_untrusted_torch_file(
+            resume, map_location="cpu", context="resume interpolation probe"
+        )
+        if isinstance(checkpoint, dict):
+            self._restore_checkpoint_interpolation(checkpoint)
 
     def _restore_checkpoint_input_size(self, loaded: dict) -> None:
         """Adopt the rectangular input size a checkpoint was saved at (#899).
