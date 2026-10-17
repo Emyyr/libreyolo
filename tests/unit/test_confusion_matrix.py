@@ -184,6 +184,19 @@ class TestCrowdRegions:
         assert matrix[2, 0] == 1
         assert int(matrix.sum()) == 1
 
+    def test_a_zero_threshold_still_needs_the_crowd_class(self):
+        cm = ConfusionMatrix(nc=2, iou_thres=0.0)
+        cm.process_image(
+            np.array([_box(110, 110)]),
+            np.array([1]),
+            np.array([0.9]),
+            np.zeros((0, 4)),
+            np.zeros(0, dtype=int),
+            crowd_boxes=self.CROWD,
+            crowd_classes=np.array([0]),
+        )
+        assert cm.matrix[1, 2] == 1
+
 
 class TestExport:
     def test_summary_has_one_row_per_predicted_class(self):

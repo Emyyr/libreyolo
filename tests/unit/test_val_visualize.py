@@ -103,6 +103,11 @@ class TestMatchDetections:
         assert m["tp"].tolist() == [False, True]
         assert m["fn"].tolist() == [False]
 
+    def test_a_zero_threshold_never_matches_another_class(self):
+        m = _match([(10, 10, 50, 50, 2, 0.9)], [(10, 10, 50, 50, 1)], iou_thres=0.0)
+        assert m["tp"].tolist() == [False]
+        assert m["fn"].tolist() == [True]
+
 
 _CROWD = {
     "crowd_boxes": np.array([[0.0, 0.0, 100.0, 100.0]]),
@@ -132,6 +137,11 @@ class TestCrowdRegions:
 
     def test_another_class_is_still_a_false_positive(self):
         m = _match([(60, 60, 90, 90, 0, 0.9)], [], **_CROWD)
+        assert m["tp"].tolist() == [False]
+
+    def test_another_class_counts_at_a_zero_threshold(self):
+        m = _match([(60, 60, 90, 90, 0, 0.9)], [], iou_thres=0.0, **_CROWD)
+        assert m["keep"].tolist() == [True]
         assert m["tp"].tolist() == [False]
 
     def test_mostly_outside_is_still_a_false_positive(self):

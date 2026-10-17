@@ -153,8 +153,8 @@ def match_detections(
 
     if len(kept_boxes) and len(gt_boxes):
         iou = _box_iou_numpy(gt_boxes, kept_boxes)  # (M, N)
-        iou[gt_classes[:, None] != kept_classes[None, :]] = 0.0
-        gt_idxs, pred_idxs = np.where(iou >= iou_thres)
+        same_class = gt_classes[:, None] == kept_classes[None, :]
+        gt_idxs, pred_idxs = np.where((iou >= iou_thres) & same_class)
         order = np.argsort(-iou[gt_idxs, pred_idxs], kind="stable")
         for gi, pi in zip(gt_idxs[order], pred_idxs[order]):
             if fn[gi] and not tp[pi]:

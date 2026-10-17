@@ -75,8 +75,8 @@ def _in_crowd(
     iy2 = np.minimum(pred_boxes[:, None, 3], crowd_boxes[None, :, 3])
     inter = np.maximum(ix2 - ix1, 0) * np.maximum(iy2 - iy1, 0)
     ioa = inter / np.maximum(area[:, None], 1e-7)
-    ioa[pred_classes[:, None] != crowd_classes[None, :]] = 0.0
-    return ioa.max(axis=1) >= iou_thres
+    same_class = pred_classes[:, None] == crowd_classes[None, :]
+    return ((ioa >= iou_thres) & same_class).any(axis=1)
 
 
 def _as_index_array(values: Any) -> np.ndarray:
