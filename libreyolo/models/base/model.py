@@ -103,6 +103,72 @@ def _drop_disabled_eval_interval(saved: dict[str, Any], requested_val: Any) -> N
         saved.pop("eval_interval", None)
 
 
+class _DefaultWorkers(int):
+    """``val(workers=...)``'s default: equals 4, yet ``is`` tells it from a passed 4."""
+
+
+_VAL_DEFAULT_WORKERS = _DefaultWorkers(4)
+
+
+def _train_call_value(name, sig, pos_names, args, merged):
+    """A ``train()`` argument as called, else its signature default, else None."""
+    if name in merged:
+        return merged[name]
+    if name in pos_names[: len(args)]:
+        return args[pos_names.index(name)]
+    param = sig.parameters.get(name)
+    if param is not None and param.default is not inspect.Parameter.empty:
+        return param.default
+    return None
+
+
+def _guard_unguarded_main_workers(model, sig, pos_names, args, merged, *, explicit):
+    """Load data in-process when DataLoader workers would re-run the script.
+
+    See :mod:`libreyolo.utils.main_guard`. An explicit ``workers`` is kept
+    (with a warning); the default count drops to 0 only for a script proven
+    to call ``train()`` outside ``if __name__ == "__main__":``.
+    """
+    accepts_workers = "workers" in sig.parameters or any(
+        p.kind == p.VAR_KEYWORD for p in sig.parameters.values()
+    )
+    if not accepts_workers:
+        return
+    from ...utils.main_guard import resolve_dataloader_workers
+
+    device = _train_call_value("device", sig, pos_names, args, merged)
+    if explicit:
+        workers = _train_call_value("workers", sig, pos_names, args, merged)
+        resolve_dataloader_workers(
+            workers, explicit=True, action="train()", device=device
+        )
+        return
+    workers = merged.get("workers")
+    if workers is None:
+        param = sig.parameters.get("workers")
+        if param is not None and param.default is not inspect.Parameter.empty:
+            workers = param.default
+        else:
+            config_cls = getattr(model, "TRAIN_CONFIG", None) or TrainConfig
+            workers = next(
+                (
+                    f.default
+                    for f in dataclasses.fields(config_cls)
+                    if f.name == "workers"
+                ),
+                None,
+            )
+    # ``None`` means the family settles its count later (per size).
+    resolved = resolve_dataloader_workers(
+        1 if workers is None else workers,
+        explicit=False,
+        action="train()",
+        device=device,
+    )
+    if resolved == 0 and workers != 0:
+        merged["workers"] = 0
+
+
 def _wrap_train_with_cfg(train_fn: Callable) -> Callable:
     """Add shared config-file and scratch-initialization handling to ``train()``.
 
@@ -133,6 +199,9 @@ def _wrap_train_with_cfg(train_fn: Callable) -> Callable:
             consumed = set(pos_names[: len(args)]) | _WRAPPER_OWNED_CFG_KEYS
             merged = {k: v for k, v in cfg_kwargs.items() if k not in consumed}
             merged.update(user_kwargs)
+        # Taken before a resume restores saved arguments: only a count the
+        # caller set is explicit.
+        explicit_workers = "workers" in merged or "workers" in pos_names[: len(args)]
 
         resume = merged.get("resume", False)
         if isinstance(resume, (str, Path)) and not isinstance(resume, bool):
@@ -210,6 +279,9 @@ def _wrap_train_with_cfg(train_fn: Callable) -> Callable:
                 if accepts_any or key in sig.parameters
             )
 
+        _guard_unguarded_main_workers(
+            self, sig, pos_names, args, merged, explicit=explicit_workers
+        )
         from ...data.event_histogram import prepare_histogram_training
         prepare_histogram_training(self, args, merged)
         return train_fn(self, *args, **merged)
@@ -2646,7 +2718,7 @@ class BaseModel(ABC):
         imgsz: int | tuple[int, int] | None = None,
         conf: float = 0.001,
         iou: float = 0.6,
-        workers: int = 4,
+        workers: int = _VAL_DEFAULT_WORKERS,
         allow_download_scripts: bool = False,
         device: str | None = None,
         split: str = "val",
@@ -2670,7 +2742,10 @@ class BaseModel(ABC):
                 the model's native input size.
             conf: Confidence threshold.
             iou: IoU threshold for NMS.
-            workers: Number of dataloader workers.
+            workers: Number of dataloader workers. Left at its default, it
+                becomes 0 for a script that calls ``val()`` outside
+                ``if __name__ == "__main__":`` under the ``spawn`` or
+                ``forkserver`` start method.
             allow_download_scripts: Allow embedded Python in dataset YAML downloads.
             device: Device to validate on. Moves the model there, as
                 ``predict(device=...)`` does (default: the model's device).
@@ -2871,6 +2946,14 @@ class BaseModel(ABC):
                 )
             logger.info("Validating on the training dataset %s", data)
 
+        from ...utils.main_guard import resolve_dataloader_workers
+
+        explicit_workers = workers is not _VAL_DEFAULT_WORKERS
+        workers = resolve_dataloader_workers(
+            workers if explicit_workers else int(workers),
+            explicit=explicit_workers,
+            action="val()",
+        )
         config = ValidationConfig(
             data=data,
             batch_size=batch,
