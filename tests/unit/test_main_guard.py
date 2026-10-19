@@ -539,6 +539,140 @@ def test_train_resume_restored_workers_kept_when_not_detected(monkeypatch):
     assert captured["workers"] == 6
 
 
+@pytest.fixture
+def rfdetr_resume(tmp_path, monkeypatch):
+    """Resume an RF-DETR ``last.pt`` saved with ``workers=4``; return trainer kwargs."""
+    import torch
+
+    from libreyolo.models.rfdetr import model as rfdetr_model
+    from libreyolo.models.rfdetr.trainer import RFDETRConfig
+
+    last = tmp_path / "runs" / "rw" / "weights" / "last.pt"
+    last.parent.mkdir(parents=True)
+    rfdetr_model.LibreRFDETR({}, size="n", nb_classes=2, device="cpu").save(str(last))
+    config = RFDETRConfig(
+        data="data.yaml", workers=4, project=str(tmp_path / "runs"), name="rw"
+    ).to_dict()
+    checkpoint = torch.load(last, map_location="cpu", weights_only=False)
+    torch.save({**checkpoint, "epoch": 0, "config": config}, last)
+
+    captured = {}
+
+    class _Trainer:
+        def __init__(self, model, wrapper_model=None, **kwargs):
+            captured.update(kwargs)
+
+        def setup(self):
+            pass
+
+        def resume(self, checkpoint_path):
+            pass
+
+        def train(self):
+            return {}
+
+    monkeypatch.setattr(rfdetr_model, "RFDETRTrainer", _Trainer)
+    model = rfdetr_model.LibreRFDETR(None, size="n", nb_classes=2, device="cpu")
+
+    def run(**kwargs):
+        model.train(resume=str(last), **kwargs)
+        return captured
+
+    return run
+
+
+def test_rfdetr_resume_restored_workers_fall_back_to_zero(reruns, rfdetr_resume):
+    assert rfdetr_resume()["workers"] == 0
+
+
+def test_rfdetr_resume_keeps_workers_passed_with_it(reruns, rfdetr_resume):
+    assert rfdetr_resume(workers=2)["workers"] == 2
+
+
+def test_rfdetr_resume_restored_workers_kept_when_not_detected(
+    monkeypatch, rfdetr_resume
+):
+    monkeypatch.setattr(main_guard, "main_script_reruns_in_workers", lambda: False)
+    assert rfdetr_resume()["workers"] == 4
+
+
+@pytest.fixture
+def dinov2_resume(tmp_path, monkeypatch):
+    """Resume a DINOv2 ``last.pt`` saved with ``workers=4``; return trainer kwargs."""
+    import torch
+    from torch import nn
+
+    import libreyolo.models.dinov2.trainer as dinov2_trainer
+    import libreyolo.models.rfdetr.nn as rfdetr_nn
+    from libreyolo.models.dinov2.config import DINOv2Config
+    from libreyolo.models.dinov2.model import LibreDINOv2
+
+    # No pretrained backbone download; the stub trainer never runs it.
+    monkeypatch.setattr(
+        rfdetr_nn,
+        "build_backbone",
+        lambda load_dinov2_weights=True, **kwargs: nn.Sequential(nn.Identity()),
+    )
+    last = tmp_path / "runs" / "dw" / "weights" / "last.pt"
+    last.parent.mkdir(parents=True)
+    config = DINOv2Config(data="saved.yaml", workers=4).to_dict()
+    torch.save({"epoch": 0, "config": config}, last)
+
+    captured = {}
+
+    class _Trainer:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def setup(self):
+            pass
+
+        def resume(self, path):
+            pass
+
+        def train(self):
+            return {}
+
+    monkeypatch.setattr(dinov2_trainer, "DINOv2Trainer", _Trainer)
+    model = LibreDINOv2(
+        model_path=None, size="n", task="semantic", nb_classes=2, device="cpu"
+    )
+
+    def run(**kwargs):
+        model.train(resume=str(last), **kwargs)
+        return captured
+
+    return run
+
+
+def test_dinov2_resume_restored_workers_fall_back_to_zero(reruns, dinov2_resume):
+    assert dinov2_resume()["workers"] == 0
+
+
+def test_dinov2_resume_keeps_workers_passed_with_it(reruns, dinov2_resume):
+    assert dinov2_resume(workers=2)["workers"] == 2
+
+
+def test_dinov2_resume_restored_workers_kept_when_not_detected(
+    monkeypatch, dinov2_resume
+):
+    monkeypatch.setattr(main_guard, "main_script_reruns_in_workers", lambda: False)
+    assert dinov2_resume()["workers"] == 4
+
+
+@pytest.mark.parametrize("fixture", ["rfdetr_resume", "dinov2_resume"])
+def test_resume_restored_workers_kept_under_torchrun(
+    reruns, request, monkeypatch, fixture
+):
+    """The resolver's torchrun check covers a restored count too.
+
+    Setting ``LOCAL_RANK`` only makes the resolver see a torchrun rank (whose
+    workers do not re-import the user's script); no distributed training runs.
+    """
+    monkeypatch.setenv("LOCAL_RANK", "0")
+    assert request.getfixturevalue(fixture)()["workers"] == 4
+
+
 # ---------------------------------------------------------------------------
 # BaseModel.val()
 # ---------------------------------------------------------------------------

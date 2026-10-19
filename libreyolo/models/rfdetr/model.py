@@ -1359,6 +1359,17 @@ class LibreRFDETR(BaseModel):
             for key, value in saved.items():
                 if key not in explicit and key not in ("epochs", "batch", "lr0"):
                     train_kwargs[key] = value
+            if "workers" not in explicit and train_kwargs.get("workers"):
+                # The shared train() guard saw this family's default of 0;
+                # a restored count gets the same check as a default one.
+                from ...utils.main_guard import resolve_dataloader_workers
+
+                train_kwargs["workers"] = resolve_dataloader_workers(
+                    train_kwargs["workers"],
+                    explicit=False,
+                    action="train()",
+                    device=train_kwargs.get("device"),
+                )
         if epochs is None:
             epochs = _TRAIN_DEFAULTS.epochs
 

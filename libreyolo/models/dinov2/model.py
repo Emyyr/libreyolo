@@ -877,9 +877,21 @@ class LibreDINOv2(BaseModel):
                 batch = saved.get("batch")
             if lr0 is None and lr is None:
                 lr0 = saved.get("lr0")
+            explicit_workers = "workers" in train_kwargs
             for key, value in saved.items():
                 if key not in train_kwargs and key not in ("data", "epochs", "batch", "lr0"):
                     train_kwargs[key] = value
+            if not explicit_workers and train_kwargs.get("workers"):
+                # The shared train() guard saw this family's default of 0;
+                # a restored count gets the same check as a default one.
+                from ...utils.main_guard import resolve_dataloader_workers
+
+                train_kwargs["workers"] = resolve_dataloader_workers(
+                    train_kwargs["workers"],
+                    explicit=False,
+                    action="train()",
+                    device=train_kwargs.get("device"),
+                )
         if epochs is None:
             epochs = _TRAIN_DEFAULTS.epochs
 
